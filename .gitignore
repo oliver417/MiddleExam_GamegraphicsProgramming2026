@@ -1,4 +1,8 @@
 .vs/
 Debug/
 Release/
-*.user/
+x64/
+ipch/
+*.user
+*.filters
+*.aps

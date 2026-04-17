@@ -33,6 +33,7 @@ cbuffer cbPerObject : register(b0)
 {
     float4x4 gWorld;
 	float4x4 gTexTransform;
+    float gHeightScale; // 지형 높이 배율
 };
 
 // Constant data that varies per material.
@@ -88,8 +89,11 @@ VertexOut VS(VertexIn vin)
 {
 	VertexOut vout = (VertexOut)0.0f;
 	
+    float3 posL = vin.PosL;
+    posL.y *= gHeightScale;
+    
     // Transform to world space.
-    float4 posW = mul(float4(vin.PosL, 1.0f), gWorld);
+    float4 posW = mul(float4(posL, 1.0f), gWorld);
     vout.PosW = posW.xyz;
 
     // Assumes nonuniform scaling; otherwise, need to use inverse-transpose of world matrix.

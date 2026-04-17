@@ -83,6 +83,8 @@ public:
 	int Run();
 	void Tick(); // 루프 안에서 업데이트 렌더링
 
+	void MarkAllRitemsDirty();
+
 	virtual bool Initialize()override;
 
 	virtual LRESULT MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)override; // ImGui 입력 재정의를 위해
@@ -127,6 +129,9 @@ private:
 public:
 	float mHeightScale = 1.0f; // 기본 지형 스케일
 	int mLandDirtyFrames = 0; // 지형이 변했을 때 3프레임 동안 업데이트하기 위한 카운터
+
+	float mTargetHeightScale = 1.0f;// 슬라이더에서 직접받는 목표
+	float mCurrentHeightScale = 1.0f;// 화면에 그려지는 배율
 
 	// 다이얼로그 핸들을 저장할 변수
 	HWND m_hEditorDlg = nullptr;
@@ -272,40 +277,6 @@ bool TexWavesApp::Initialize()
 	// Wait until initialization is complete.
 	FlushCommandQueue();
 
-
-	// ImGui 초기화
-	IMGUI_CHECKVERSION();
-	ImGui::CreateContext();
-
-	ImGuiIO& io = ImGui::GetIO();//윈도우 기본 폰트 사용해서 한글 사용할 수 있게 함(슬라이드 텍스트 등등)
-	io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 18.0f, NULL, io.Fonts->GetGlyphRangesKorean());
-
-	ImGui::StyleColorsDark();
-
-	ImGui_ImplWin32_Init(MainWnd());
-	ImGui_ImplDX12_InitInfo initInfo = {};
-	initInfo.Device = md3dDevice.Get();
-	initInfo.CommandQueue = mCommandQueue.Get();
-	initInfo.NumFramesInFlight = gNumFrameResources;
-	initInfo.RTVFormat = mBackBufferFormat;
-
-	// ImGui용 슬롯은 텍스처 3개(0,1,2) 이후인 슬롯 3번으로 지정
-	UINT descriptorSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-	UINT texCount = (UINT)mTextures.size();
-
-	D3D12_CPU_DESCRIPTOR_HANDLE imguiCpuHandle = mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
-	imguiCpuHandle.ptr += texCount * descriptorSize;  // 슬롯 3번
-
-	D3D12_GPU_DESCRIPTOR_HANDLE imguiGpuHandle = mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
-	imguiGpuHandle.ptr += texCount * descriptorSize;  // 슬롯 3번
-
-	initInfo.LegacySingleSrvCpuDescriptor = imguiCpuHandle;
-	initInfo.LegacySingleSrvGpuDescriptor = imguiGpuHandle;
-
-	ImGui_ImplDX12_Init(&initInfo);
-
-
 	// 다이얼 로그 생성 코드
 	gApp = this;
 
@@ -317,6 +288,8 @@ bool TexWavesApp::Initialize()
 		SetWindowPos(m_hEditorDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 	}
 
+	mLandDirtyFrames = gNumFrameResources;
+
 	return true;
 }
 
@@ -324,9 +297,9 @@ bool TexWavesApp::Initialize()
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT TexWavesApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-	// ImGui가 메세지를 먼저 처리할 수 있게
-	if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
-		return true;
+	//// ImGui가 메세지를 먼저 처리할 수 있게
+	//if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
+	//	return true;
 
 	return D3DApp::MsgProc(hwnd, msg, wParam, lParam);
 }
@@ -343,14 +316,17 @@ void TexWavesApp::OnResize()
 
 void TexWavesApp::Update(const GameTimer& gt)
 {
-	// ImGui 프레임 시작
-	ImGui_ImplDX12_NewFrame();
-	ImGui_ImplWin32_NewFrame();
-	ImGui::NewFrame();
-
 	OnKeyboardInput(gt);
 	UpdateCamera(gt);
-	UpdateUI(gt);
+
+	float prev = mCurrentHeightScale;
+	mCurrentHeightScale += (mTargetHeightScale - mCurrentHeightScale) * 0.1f;
+
+	// 값이 변할 때 상수 버퍼만 업데이트하도록
+	if (fabsf(mCurrentHeightScale - prev) > 0.0001f)
+	{
+		MarkAllRitemsDirty();
+	}
 
 	// Cycle through the circular frame resource array.
 	mCurrFrameResourceIndex = (mCurrFrameResourceIndex + 1) % gNumFrameResources;
@@ -413,10 +389,6 @@ void TexWavesApp::Draw(const GameTimer& gt)
 	mCommandList->SetPipelineState(mPSOs["transparent"].Get());
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
 
-	// ImGui 실제 그리기 명령
-	ImGui::Render();
-	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), mCommandList.Get());
-
 	// Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
 		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));	
@@ -442,9 +414,7 @@ void TexWavesApp::Draw(const GameTimer& gt)
 }
 
 void TexWavesApp::OnMouseDown(WPARAM btnState, int x, int y)
-{
-	// ImGui가 UI 조작 중이면 카메라 조작을 막음
-	if (ImGui::GetIO().WantCaptureMouse) return;
+{	
 
 	mLastMousePos.x = x;
 	mLastMousePos.y = y;
@@ -459,7 +429,6 @@ void TexWavesApp::OnMouseUp(WPARAM btnState, int x, int y)
 
 void TexWavesApp::OnMouseMove(WPARAM btnState, int x, int y)
 {
-	if (ImGui::GetIO().WantCaptureMouse) return;
 
 	if ((btnState & MK_LBUTTON) != 0)
 	{
@@ -534,6 +503,9 @@ void TexWavesApp::UpdateObjectCBs(const GameTimer& gt)
 			ObjectConstants objConstants;
 			XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));
 			XMStoreFloat4x4(&objConstants.TexTransform, XMMatrixTranspose(texTransform));
+			
+			// 보간된 값을 상수 버퍼에 입력
+			objConstants.HeightScale = mCurrentHeightScale;
 
 			currObjectCB->CopyData(e->ObjCBIndex, objConstants);
 
@@ -666,20 +638,20 @@ void TexWavesApp::UpdateLandVB(const GameTimer& gt)
 	if (mLandDirtyFrames <= 0) return;
 
 	auto currLandVB = mCurrFrameResource->LandVB.get();
+	float s = 1.0f;
 
 	for (size_t i = 0; i < mLandVertices.size(); ++i)
 	{
 		Vertex v = mLandVertices[i]; // 원본 정점 데이터 복사
-		XMFLOAT3 p = v.Pos;
 
-		// 새로운 mHeightScale을 적용하여 높이(y)와 법선(Normal)을 재계산
-		p.y = mHeightScale * 0.3f * (p.z * sinf(0.1f * p.x) + p.x * cosf(0.1f * p.z));
-		v.Pos = p;
+		// 노멀만 현재 스케일 기준으로 재계산
+		float x = v.Pos.x, z = v.Pos.z;
+		v.Pos.y = 0.3f * (z * sinf(0.1f * x) + x * cosf(0.1f * z));
 
 		XMFLOAT3 n(
-			-mHeightScale * 0.03f * p.z * cosf(0.1f * p.x) - mHeightScale * 0.3f * cosf(0.1f * p.z),
+			-s * 0.03f * z * cosf(0.1f * x) - s * 0.3f * cosf(0.1f * z),
 			1.0f,
-			-mHeightScale * 0.3f * sinf(0.1f * p.x) + mHeightScale * 0.03f * p.x * sinf(0.1f * p.z)
+			-s * 0.3f * sinf(0.1f * x) + s * 0.03f * x * sinf(0.1f * z)
 		);
 		XMVECTOR unitNormal = XMVector3Normalize(XMLoadFloat3(&n));
 		XMStoreFloat3(&v.Normal, unitNormal);
@@ -768,7 +740,7 @@ void TexWavesApp::BuildDescriptorHeaps()
 	UINT texCount = (UINT)mTextures.size(); // 정적할당이 너무 불편해서 동적할당으로 변경함
 
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = texCount + 1; // +1은 ImGUi용도
+	srvHeapDesc.NumDescriptors = texCount;
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -1272,10 +1244,10 @@ INT_PTR CALLBACK EditorDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		{
 			// 슬라이더 값을 0~50에서 0.0f~5.0f로 변환
 			int pos = SendDlgItemMessage(hDlg, IDC_SLIDER_HEIGHT, TBM_GETPOS, 0, 0);
-			gApp->mHeightScale = (float)pos / 10.0f;
-
-			// 지형 업데이트 플래그 켜기
-			gApp->mLandDirtyFrames = 3; // gNumFrameResources
+			gApp->mTargetHeightScale = (float)pos / 10.0f;
+			gApp->mHeightScale = gApp->mTargetHeightScale;
+			gApp->mLandDirtyFrames = gNumFrameResources;
+			gApp->MarkAllRitemsDirty();
 		}
 		return (INT_PTR)TRUE;
 
@@ -1328,5 +1300,13 @@ void TexWavesApp::Tick()
 	else
 	{
 		Sleep(100);
+	}
+}
+
+void TexWavesApp::MarkAllRitemsDirty()
+{
+	for (auto& e : mAllRitems)
+	{
+		e->NumFramesDirty = gNumFrameResources; // 보통 3
 	}
 }

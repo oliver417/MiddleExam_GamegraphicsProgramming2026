@@ -6,6 +6,9 @@
 #include "../../Common/MathHelper.h"
 #include "../../Common/UploadBuffer.h"
 #include "../../Common/GeometryGenerator.h"
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx12.h"
 #include "FrameResource.h"
 #include "Waves.h"
 
@@ -70,6 +73,8 @@ public:
 
 	virtual bool Initialize()override;
 
+	virtual LRESULT MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)override; // ImGui 입력 재정의를 위해
+
 private:
 	virtual void OnResize()override;
 	virtual void Update(const GameTimer& gt)override;
@@ -86,6 +91,8 @@ private:
 	void UpdateMaterialCBs(const GameTimer& gt);
 	void UpdateMainPassCB(const GameTimer& gt);
 	void UpdateWaves(const GameTimer& gt);
+	void UpdateUI(const GameTimer& gt);
+	void UpdateLandVB(const GameTimer& gt);
 
 	void LoadTextures();
 	void BuildRootSignature();
@@ -134,6 +141,11 @@ private:
 	std::vector<RenderItem*> mRitemLayer[(int)RenderLayer::Count];
 
 	std::unique_ptr<Waves> mWaves;
+	
+	UINT mLandVertexCount = 0;
+
+	std::vector<Vertex> mLandVertices; // CPU에서 수정할 정점 배열
+	int mLandDirtyFrames = 0; // 지형이 변했을 때 3프레임 동안 업데이트하기 위한 카운터
 
 	PassConstants mMainPassCB;
 
@@ -144,6 +156,8 @@ private:
 	float mTheta = 1.5f * XM_PI;
 	float mPhi = XM_PIDIV2 - 0.1f;
 	float mRadius = 50.0f;
+
+	float mHeightScale = 1.0f; // grass 기본 지형 높이 배율
 
 	POINT mLastMousePos;
 };
@@ -216,7 +230,51 @@ bool TexWavesApp::Initialize()
 	// Wait until initialization is complete.
 	FlushCommandQueue();
 
+
+	// ImGui 초기화
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+
+	ImGuiIO& io = ImGui::GetIO();//윈도우 기본 폰트 사용해서 한글 사용할 수 있게 함(슬라이드 텍스트 등등)
+	io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 18.0f, NULL, io.Fonts->GetGlyphRangesKorean());
+
+	ImGui::StyleColorsDark();
+
+	ImGui_ImplWin32_Init(MainWnd());
+	ImGui_ImplDX12_InitInfo initInfo = {};
+	initInfo.Device = md3dDevice.Get();
+	initInfo.CommandQueue = mCommandQueue.Get();
+	initInfo.NumFramesInFlight = gNumFrameResources;
+	initInfo.RTVFormat = mBackBufferFormat;
+
+	// ImGui용 슬롯은 텍스처 3개(0,1,2) 이후인 슬롯 3번으로 지정
+	UINT descriptorSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+	UINT texCount = (UINT)mTextures.size();
+
+	D3D12_CPU_DESCRIPTOR_HANDLE imguiCpuHandle = mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+	imguiCpuHandle.ptr += texCount * descriptorSize;  // 슬롯 3번
+
+	D3D12_GPU_DESCRIPTOR_HANDLE imguiGpuHandle = mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+	imguiGpuHandle.ptr += texCount * descriptorSize;  // 슬롯 3번
+
+	initInfo.LegacySingleSrvCpuDescriptor = imguiCpuHandle;
+	initInfo.LegacySingleSrvGpuDescriptor = imguiGpuHandle;
+
+	ImGui_ImplDX12_Init(&initInfo);
+
 	return true;
+}
+
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+LRESULT TexWavesApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	// ImGui가 메세지를 먼저 처리할 수 있게
+	if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
+		return true;
+
+	return D3DApp::MsgProc(hwnd, msg, wParam, lParam);
 }
 
 void TexWavesApp::OnResize()
@@ -230,8 +288,14 @@ void TexWavesApp::OnResize()
 
 void TexWavesApp::Update(const GameTimer& gt)
 {
+	// ImGui 프레임 시작
+	ImGui_ImplDX12_NewFrame();
+	ImGui_ImplWin32_NewFrame();
+	ImGui::NewFrame();
+
 	OnKeyboardInput(gt);
 	UpdateCamera(gt);
+	UpdateUI(gt);
 
 	// Cycle through the circular frame resource array.
 	mCurrFrameResourceIndex = (mCurrFrameResourceIndex + 1) % gNumFrameResources;
@@ -252,6 +316,7 @@ void TexWavesApp::Update(const GameTimer& gt)
 	UpdateMaterialCBs(gt);
 	UpdateMainPassCB(gt);
 	UpdateWaves(gt);
+	UpdateLandVB(gt);
 }
 
 void TexWavesApp::Draw(const GameTimer& gt)
@@ -293,9 +358,13 @@ void TexWavesApp::Draw(const GameTimer& gt)
 	mCommandList->SetPipelineState(mPSOs["transparent"].Get());
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
 
+	// ImGui 실제 그리기 명령
+	ImGui::Render();
+	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), mCommandList.Get());
+
 	// Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
-		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
+		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));	
 
 	// Done recording commands.
 	ThrowIfFailed(mCommandList->Close());
@@ -385,20 +454,14 @@ void TexWavesApp::UpdateCamera(const GameTimer& gt)
 void TexWavesApp::AnimateMaterials(const GameTimer& gt)
 {
 	// Scroll the water material texture coordinates.
-	auto waterMat = mMaterials["water"].get();
-	auto grassMat = mMaterials["grass"].get();
+	auto waterMat = mMaterials["water"].get();	
 
 	float& tu = waterMat->MatTransform(3, 0);
-	float& tv = waterMat->MatTransform(3, 1);
-
-	float& g_tu = grassMat->MatTransform(3, 0);
-	float& g_tv = grassMat->MatTransform(3, 1);
+	float& tv = waterMat->MatTransform(3, 1);	
+	
 
 	tu += 0.1f * gt.DeltaTime();
 	tv += 0.02f * gt.DeltaTime();
-
-	g_tu += 0.1f * gt.DeltaTime();
-	g_tv += 0.02f * gt.DeltaTime();
 
 	if (tu >= 1.0f)
 		tu += 1.0f;
@@ -406,21 +469,11 @@ void TexWavesApp::AnimateMaterials(const GameTimer& gt)
 	if (tv >= 1.0f)
 		tv -= 1.0f;
 
-	if (g_tu >= 1.0f)
-		g_tu += 1.0f;
-
-	if (g_tv >= 1.0f)
-		g_tv -= 1.0f;
-
 	waterMat->MatTransform(3, 0) = tu;
 	waterMat->MatTransform(3, 1) = tv;
-
-	grassMat->MatTransform(3, 0) = g_tu;
-	grassMat->MatTransform(3, 1) = g_tv;
-
+	
 	// Material has changed, so need to update cbuffer.
 	waterMat->NumFramesDirty = gNumFrameResources;
-	grassMat->NumFramesDirty = gNumFrameResources;
 }
 
 void TexWavesApp::UpdateObjectCBs(const GameTimer& gt)
@@ -548,6 +601,51 @@ void TexWavesApp::UpdateWaves(const GameTimer& gt)
 	mWavesRitem->Geo->VertexBufferGPU = currWavesVB->Resource();
 }
 
+void TexWavesApp::UpdateUI(const GameTimer& gt)
+{
+	ImGui::Begin(u8"맵 에디터");
+
+	if (ImGui::SliderFloat(u8"지형 높이", &mHeightScale, 0.0f, 5.0f))
+	{
+		// 슬라이더가 움직이면 3개의 프레임 리소스를 모두 업데이트하도록 카운트 설정
+		mLandDirtyFrames = gNumFrameResources;
+	}
+
+	ImGui::End();
+}
+
+void TexWavesApp::UpdateLandVB(const GameTimer& gt)
+{
+	// 업데이트 필요없으면 리턴
+	if (mLandDirtyFrames <= 0) return;
+
+	auto currLandVB = mCurrFrameResource->LandVB.get();
+
+	for (size_t i = 0; i < mLandVertices.size(); ++i)
+	{
+		Vertex v = mLandVertices[i]; // 원본 정점 데이터 복사
+		XMFLOAT3 p = v.Pos;
+
+		// 새로운 mHeightScale을 적용하여 높이(y)와 법선(Normal)을 재계산
+		p.y = mHeightScale * 0.3f * (p.z * sinf(0.1f * p.x) + p.x * cosf(0.1f * p.z));
+		v.Pos = p;
+
+		XMFLOAT3 n(
+			-mHeightScale * 0.03f * p.z * cosf(0.1f * p.x) - mHeightScale * 0.3f * cosf(0.1f * p.z),
+			1.0f,
+			-mHeightScale * 0.3f * sinf(0.1f * p.x) + mHeightScale * 0.03f * p.x * sinf(0.1f * p.z)
+		);
+		XMVECTOR unitNormal = XMVector3Normalize(XMLoadFloat3(&n));
+		XMStoreFloat3(&v.Normal, unitNormal);
+
+		// 현재 프레임 리소스의 UploadBuffer에 변경된 정점 덮어쓰기
+		currLandVB->CopyData(i, v);
+	}
+
+	// 카운터 감소 (3 -> 2 -> 1 -> 0)
+	mLandDirtyFrames--;
+}
+
 void TexWavesApp::LoadTextures()
 {
 	auto grassTex = std::make_unique<Texture>();
@@ -621,8 +719,10 @@ void TexWavesApp::BuildDescriptorHeaps()
 	//
 	// Create the SRV heap.
 	//
+	UINT texCount = (UINT)mTextures.size(); // 정적할당이 너무 불편해서 동적할당으로 변경함
+
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 3;
+	srvHeapDesc.NumDescriptors = texCount + 1; // +1은 ImGUi용도
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -681,17 +781,19 @@ void TexWavesApp::BuildLandGeometry()
 	// sandy looking beaches, grassy low hills, and snow mountain peaks.
 	//
 
-	std::vector<Vertex> vertices(grid.Vertices.size());
+	mLandVertexCount = (UINT)grid.Vertices.size();
+
+	mLandVertices.resize(mLandVertexCount);
 	for (size_t i = 0; i < grid.Vertices.size(); ++i)
 	{
 		auto& p = grid.Vertices[i].Position;
-		vertices[i].Pos = p;
-		vertices[i].Pos.y = GetHillsHeight(p.x, p.z);
-		vertices[i].Normal = GetHillsNormal(p.x, p.z);
-		vertices[i].TexC = grid.Vertices[i].TexC;
+		mLandVertices[i].Pos = p;
+		mLandVertices[i].Pos.y = GetHillsHeight(p.x, p.z);
+		mLandVertices[i].Normal = GetHillsNormal(p.x, p.z);
+		mLandVertices[i].TexC = grid.Vertices[i].TexC;
 	}
 
-	const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+	const UINT vbByteSize = (UINT)mLandVertices.size() * sizeof(Vertex);
 
 	std::vector<std::uint16_t> indices = grid.GetIndices16();
 	const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
@@ -700,13 +802,13 @@ void TexWavesApp::BuildLandGeometry()
 	geo->Name = "landGeo";
 
 	ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
-	CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), vertices.data(), vbByteSize);
+	CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), mLandVertices.data(), vbByteSize);
 
 	ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
 	CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
 
 	geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
-		mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
+		mCommandList.Get(), mLandVertices.data(), vbByteSize, geo->VertexBufferUploader);
 
 	geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
 		mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
@@ -887,7 +989,7 @@ void TexWavesApp::BuildFrameResources()
 	for (int i = 0; i < gNumFrameResources; ++i)
 	{
 		mFrameResources.push_back(std::make_unique<FrameResource>(md3dDevice.Get(),
-			1, (UINT)mAllRitems.size(), (UINT)mMaterials.size(), mWaves->VertexCount()));
+			1, (UINT)mAllRitems.size(), (UINT)mMaterials.size(), mWaves->VertexCount(), mLandVertexCount));
 	}
 }
 
@@ -907,8 +1009,8 @@ void TexWavesApp::BuildMaterials()
 	water->Name = "water";
 	water->MatCBIndex = 1;
 	water->DiffuseSrvHeapIndex = 1;
-	water->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 0.5f);
-	water->FresnelR0 = XMFLOAT3(0.2f, 0.2f, 0.2f);
+	water->DiffuseAlbedo = XMFLOAT4(0.0f, 0.2f, 0.6f, 0.5f);
+	water->FresnelR0 = XMFLOAT3(0.1f, 0.1f, 0.1f);
 	water->Roughness = 0.0f;
 
 	auto wirefence = std::make_unique<Material>();
@@ -928,7 +1030,9 @@ void TexWavesApp::BuildRenderItems()
 {
 	auto wavesRitem = std::make_unique<RenderItem>();
 //	wavesRitem->World = MathHelper::Identity4x4();
-	XMStoreFloat4x4(&wavesRitem->World, XMMatrixScaling(5.0f, 1.0f, 5.0f));
+	XMMATRIX scale = XMMatrixScaling(5.0f, 1.0f, 5.0f);
+	XMMATRIX offset = XMMatrixTranslation(0.0f, 0.5f, 0.0f);
+	XMStoreFloat4x4(&wavesRitem->World, XMMatrixMultiply(scale, offset));
 	XMStoreFloat4x4(&wavesRitem->TexTransform, XMMatrixScaling(25.0f, 25.0f, 1.0f));
 	wavesRitem->ObjCBIndex = 0;
 	wavesRitem->Mat = mMaterials["water"].get();
@@ -944,7 +1048,8 @@ void TexWavesApp::BuildRenderItems()
 
 	auto gridRitem = std::make_unique<RenderItem>();
 	gridRitem->World = MathHelper::Identity4x4();
-	XMStoreFloat4x4(&gridRitem->TexTransform, XMMatrixScaling(5.0f, 5.0f, 1.0f));
+	XMStoreFloat4x4(&gridRitem->World, XMMatrixScaling(5.0f, 1.0f, 5.0f));
+	XMStoreFloat4x4(&gridRitem->TexTransform, XMMatrixScaling(15.0f, 15.0f, 1.0f));
 	gridRitem->ObjCBIndex = 1;
 	gridRitem->Mat = mMaterials["grass"].get();
 	gridRitem->Geo = mGeometries["landGeo"].get();
@@ -985,7 +1090,32 @@ void TexWavesApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std:
 	{
 		auto ri = ritems[i];
 
-		cmdList->IASetVertexBuffers(0, 1, &ri->Geo->VertexBufferView());
+		if (ri->Geo->Name == "landGeo")
+		{
+			auto landVBView = mCurrFrameResource->LandVB->Resource()->GetGPUVirtualAddress();
+			D3D12_VERTEX_BUFFER_VIEW vbv;
+			vbv.BufferLocation = landVBView;
+			vbv.StrideInBytes = sizeof(Vertex);
+			vbv.SizeInBytes = mLandVertexCount * sizeof(Vertex); // 총 바이트 크기
+
+			cmdList->IASetVertexBuffers(0, 1, &vbv);
+		}
+		else if (ri->Geo->Name == "waterGeo")
+		{
+			auto wavesVBView = mCurrFrameResource->WavesVB->Resource()->GetGPUVirtualAddress();
+			D3D12_VERTEX_BUFFER_VIEW vbv;
+			vbv.BufferLocation = wavesVBView;
+			vbv.StrideInBytes = sizeof(Vertex);
+			vbv.SizeInBytes = mWaves->VertexCount() * sizeof(Vertex);
+
+			cmdList->IASetVertexBuffers(0, 1, &vbv);
+		}
+		else
+		{
+			// 상자 등 나머지 움직이지 않는 물체들은 원래 있던 정적 버퍼 사용
+			cmdList->IASetVertexBuffers(0, 1, &ri->Geo->VertexBufferView());
+		}
+
 		cmdList->IASetIndexBuffer(&ri->Geo->IndexBufferView());
 		cmdList->IASetPrimitiveTopology(ri->PrimitiveType);
 

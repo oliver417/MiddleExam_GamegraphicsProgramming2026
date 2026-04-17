@@ -88,6 +88,7 @@
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)ImGui\Backends;$(ProjectDir)ImGui\Core;</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -101,6 +102,7 @@
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)ImGui\Backends;$(ProjectDir)ImGui\Core;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -116,6 +118,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)ImGui\Backends;$(ProjectDir)ImGui\Core;</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -133,6 +136,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)ImGui\Backends;$(ProjectDir)ImGui\Core;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -149,6 +153,12 @@
     <ClCompile Include="..\..\Common\GeometryGenerator.cpp" />
     <ClCompile Include="..\..\Common\MathHelper.cpp" />
     <ClCompile Include="FrameResource.cpp" />
+    <ClCompile Include="ImGui\Backends\imgui_impl_dx12.cpp" />
+    <ClCompile Include="ImGui\Backends\imgui_impl_win32.cpp" />
+    <ClCompile Include="ImGui\Core\imgui.cpp" />
+    <ClCompile Include="ImGui\Core\imgui_draw.cpp" />
+    <ClCompile Include="ImGui\Core\imgui_tables.cpp" />
+    <ClCompile Include="ImGui\Core\imgui_widgets.cpp" />
     <ClCompile Include="TexWavesApp.cpp" />
     <ClCompile Include="Waves.cpp" />
   </ItemGroup>
@@ -162,6 +172,14 @@
     <ClInclude Include="..\..\Common\MathHelper.h" />
     <ClInclude Include="..\..\Common\UploadBuffer.h" />
     <ClInclude Include="FrameResource.h" />
+    <ClInclude Include="ImGui\Backends\imgui_impl_dx12.h" />
+    <ClInclude Include="ImGui\Backends\imgui_impl_win32.h" />
+    <ClInclude Include="ImGui\Core\imconfig.h" />
+    <ClInclude Include="ImGui\Core\imgui.h" />
+    <ClInclude Include="ImGui\Core\imgui_internal.h" />
+    <ClInclude Include="ImGui\Core\imstb_rectpack.h" />
+    <ClInclude Include="ImGui\Core\imstb_textedit.h" />
+    <ClInclude Include="ImGui\Core\imstb_truetype.h" />
     <ClInclude Include="Waves.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

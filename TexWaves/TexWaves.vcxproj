@@ -146,6 +146,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\Common\Camera.cpp" />
     <ClCompile Include="..\..\Common\d3dApp.cpp" />
     <ClCompile Include="..\..\Common\d3dUtil.cpp" />
     <ClCompile Include="..\..\Common\DDSTextureLoader.cpp" />
@@ -163,6 +164,7 @@
     <ClCompile Include="Waves.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\Common\Camera.h" />
     <ClInclude Include="..\..\Common\d3dApp.h" />
     <ClInclude Include="..\..\Common\d3dUtil.h" />
     <ClInclude Include="..\..\Common\d3dx12.h" />
@@ -180,7 +182,11 @@
     <ClInclude Include="ImGui\Core\imstb_rectpack.h" />
     <ClInclude Include="ImGui\Core\imstb_textedit.h" />
     <ClInclude Include="ImGui\Core\imstb_truetype.h" />
+    <ClInclude Include="resource.h" />
     <ClInclude Include="Waves.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="TexWaves.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

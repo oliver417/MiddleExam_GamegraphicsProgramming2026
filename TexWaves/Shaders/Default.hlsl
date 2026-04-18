@@ -74,6 +74,7 @@ struct VertexIn
 	float3 PosL    : POSITION;
     float3 NormalL : NORMAL;
 	float2 TexC    : TEXCOORD;
+    float4 Color   : COLOR;
 };
 
 struct VertexOut
@@ -82,6 +83,7 @@ struct VertexOut
     float3 PosW    : POSITION;
     float3 NormalW : NORMAL;
 	float2 TexC    : TEXCOORD;
+    float4 Color   : COLOR;
 };
 
 VertexOut VS(VertexIn vin)
@@ -102,13 +104,22 @@ VertexOut VS(VertexIn vin)
 	float4 texC = mul(float4(vin.TexC, 0.0f, 1.0f), gTexTransform);
 	vout.TexC = mul(texC, gMatTransform).xy;
 	
+    vout.Color = vin.Color;
     return vout;
 }
 
 float4 PS(VertexOut pin) : SV_Target
 {
-    float4 diffuseAlbedo = gDiffuseMap.Sample(gsamAnisotropicWrap, pin.TexC) * gDiffuseAlbedo;
+    float4 texColor = gDiffuseMap.Sample(gsamAnisotropicWrap, pin.TexC) * gDiffuseAlbedo;
+    
+    float4 diffuseAlbedo = texColor * pin.Color;
 	
+    if (pin.Color.r > 0.9f && pin.Color.g > 0.9f && pin.Color.b > 0.9f)
+    {
+        // 텍스처 색상을 무시하고, 버텍스 컬러로 덮기
+        diffuseAlbedo = lerp(texColor, pin.Color, 0.5f);
+    }
+    
     // Interpolating normal can unnormalize it, so renormalize it.
     pin.NormalW = normalize(pin.NormalW);
 

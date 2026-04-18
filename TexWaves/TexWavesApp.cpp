@@ -6,6 +6,7 @@
 #include "../../Common/MathHelper.h"
 #include "../../Common/UploadBuffer.h"
 #include "../../Common/GeometryGenerator.h"
+#include "../../Common/Camera.h"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
@@ -145,19 +146,21 @@ private:
 	UINT mLandVertexCount = 0;
 
 	std::vector<Vertex> mLandVertices; // CPU에서 수정할 정점 배열
-	int mLandDirtyFrames = 0; // 지형이 변했을 때 3프레임 동안 업데이트하기 위한 카운터
+	int mLandDirtyFrames = gNumFrameResources; // 지형이 변했을 때 3프레임 동안 업데이트하기 위한 카운터
 
 	PassConstants mMainPassCB;
 
-	XMFLOAT3 mEyePos = { 0.0f, 0.0f, 0.0f };
-	XMFLOAT4X4 mView = MathHelper::Identity4x4();
-	XMFLOAT4X4 mProj = MathHelper::Identity4x4();
-
-	float mTheta = 1.5f * XM_PI;
-	float mPhi = XM_PIDIV2 - 0.1f;
-	float mRadius = 50.0f;
-
 	float mHeightScale = 1.0f; // grass 기본 지형 높이 배율
+
+	Camera mCamera; // 새롭게 추가할 카메라 객체
+
+	// 고도별 기본 색상
+	DirectX::XMFLOAT4 mLowColor = { 0.95f, 0.85f, 0.65f, 1.0f };  // 모래
+	DirectX::XMFLOAT4 mMidColor = { 0.48f, 0.77f, 0.46f, 1.0f };  // 풀
+	DirectX::XMFLOAT4 mHighColor = { 1.0f, 1.0f, 1.0f, 1.0f };    // 눈
+
+	float mLowThreshold = 2.0f; // 아래 -> 중간 기준점
+	float mHighThreshold = 10.0f; // 중간 -> 위 기준점
 
 	POINT mLastMousePos;
 };
@@ -209,6 +212,7 @@ bool TexWavesApp::Initialize()
 	mCbvSrvDescriptorSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
 	mWaves = std::make_unique<Waves>(128, 128, 1.0f, 0.03f, 4.0f, 0.2f);
+	mCamera.SetPosition(0.0f, 20.0f, -50.0f);
 
 	LoadTextures();
 	BuildRootSignature();
@@ -281,9 +285,8 @@ void TexWavesApp::OnResize()
 {
 	D3DApp::OnResize();
 
-	// The window resized, so update the aspect ratio and recompute the projection matrix.
-	XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
-	XMStoreFloat4x4(&mProj, P);
+	// 화면 비율에 맞춰 카메라 렌즈 설정
+	mCamera.SetLens(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
 }
 
 void TexWavesApp::Update(const GameTimer& gt)
@@ -388,6 +391,9 @@ void TexWavesApp::Draw(const GameTimer& gt)
 
 void TexWavesApp::OnMouseDown(WPARAM btnState, int x, int y)
 {
+	// ImGui가 마우스 입력을 사용 중이면 함수 종료
+	if (ImGui::GetIO().WantCaptureKeyboard) return;
+
 	mLastMousePos.x = x;
 	mLastMousePos.y = y;
 
@@ -401,30 +407,17 @@ void TexWavesApp::OnMouseUp(WPARAM btnState, int x, int y)
 
 void TexWavesApp::OnMouseMove(WPARAM btnState, int x, int y)
 {
+	if (ImGui::GetIO().WantCaptureKeyboard) return;
+
 	if ((btnState & MK_LBUTTON) != 0)
 	{
-		// Make each pixel correspond to a quarter of a degree.
+		// 마우스 이동량 계산
 		float dx = XMConvertToRadians(0.25f * static_cast<float>(x - mLastMousePos.x));
 		float dy = XMConvertToRadians(0.25f * static_cast<float>(y - mLastMousePos.y));
 
-		// Update angles based on input to orbit camera around box.
-		mTheta += dx;
-		mPhi += dy;
-
-		// Restrict the angle mPhi.
-		mPhi = MathHelper::Clamp(mPhi, 0.1f, MathHelper::Pi - 0.1f);
-	}
-	else if ((btnState & MK_RBUTTON) != 0)
-	{
-		// Make each pixel correspond to 0.2 unit in the scene.
-		float dx = 0.2f * static_cast<float>(x - mLastMousePos.x);
-		float dy = 0.2f * static_cast<float>(y - mLastMousePos.y);
-
-		// Update the camera radius based on input.
-		mRadius += dx - dy;
-
-		// Restrict the radius.
-		mRadius = MathHelper::Clamp(mRadius, 5.0f, 150.0f);
+		// 카메라 회전 적용 (Pitch: 상하, RotateY: 좌우)
+		mCamera.Pitch(dy);
+		mCamera.RotateY(dx);
 	}
 
 	mLastMousePos.x = x;
@@ -433,22 +426,20 @@ void TexWavesApp::OnMouseMove(WPARAM btnState, int x, int y)
 
 void TexWavesApp::OnKeyboardInput(const GameTimer& gt)
 {
+	const float dt = gt.DeltaTime();
+	float speed = 100.0f * dt; // 이동 속도
+
+	if (GetAsyncKeyState('W') & 0x8000) mCamera.Walk(speed);
+	if (GetAsyncKeyState('S') & 0x8000) mCamera.Walk(-speed);
+	if (GetAsyncKeyState('A') & 0x8000) mCamera.Strafe(-speed);
+	if (GetAsyncKeyState('D') & 0x8000) mCamera.Strafe(speed);
 }
 
 void TexWavesApp::UpdateCamera(const GameTimer& gt)
 {
-	// Convert Spherical to Cartesian coordinates.
-	mEyePos.x = mRadius * sinf(mPhi) * cosf(mTheta);
-	mEyePos.z = mRadius * sinf(mPhi) * sinf(mTheta);
-	mEyePos.y = mRadius * cosf(mPhi);
+	OnKeyboardInput(gt); // 카메라 이동을 위한 키보드 입력 호출
 
-	// Build the view matrix.
-	XMVECTOR pos = XMVectorSet(mEyePos.x, mEyePos.y, mEyePos.z, 1.0f);
-	XMVECTOR target = XMVectorZero();
-	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-
-	XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
-	XMStoreFloat4x4(&mView, view);
+	mCamera.UpdateViewMatrix(); // 카메라가 가지고 있는 뷰 행렬 최신화
 }
 
 void TexWavesApp::AnimateMaterials(const GameTimer& gt)
@@ -528,8 +519,8 @@ void TexWavesApp::UpdateMaterialCBs(const GameTimer& gt)
 
 void TexWavesApp::UpdateMainPassCB(const GameTimer& gt)
 {
-	XMMATRIX view = XMLoadFloat4x4(&mView);
-	XMMATRIX proj = XMLoadFloat4x4(&mProj);
+	XMMATRIX view = mCamera.GetView();
+	XMMATRIX proj = mCamera.GetProj();
 
 	XMMATRIX viewProj = XMMatrixMultiply(view, proj);
 	XMMATRIX invView = XMMatrixInverse(&XMMatrixDeterminant(view), view);
@@ -542,7 +533,7 @@ void TexWavesApp::UpdateMainPassCB(const GameTimer& gt)
 	XMStoreFloat4x4(&mMainPassCB.InvProj, XMMatrixTranspose(invProj));
 	XMStoreFloat4x4(&mMainPassCB.ViewProj, XMMatrixTranspose(viewProj));
 	XMStoreFloat4x4(&mMainPassCB.InvViewProj, XMMatrixTranspose(invViewProj));
-	mMainPassCB.EyePosW = mEyePos;
+	mMainPassCB.EyePosW = mCamera.GetPosition3f();
 	mMainPassCB.RenderTargetSize = XMFLOAT2((float)mClientWidth, (float)mClientHeight);
 	mMainPassCB.InvRenderTargetSize = XMFLOAT2(1.0f / mClientWidth, 1.0f / mClientHeight);
 	mMainPassCB.NearZ = 1.0f;
@@ -594,6 +585,8 @@ void TexWavesApp::UpdateWaves(const GameTimer& gt)
 		v.TexC.x = 0.5f + v.Pos.x / mWaves->Width();
 		v.TexC.y = 0.5f - v.Pos.z / mWaves->Depth();
 
+		v.Color = XMFLOAT4(0.0f, 0.4f, 0.8f, 0.5f);
+
 		currWavesVB->CopyData(i, v);
 	}
 
@@ -603,12 +596,61 @@ void TexWavesApp::UpdateWaves(const GameTimer& gt)
 
 void TexWavesApp::UpdateUI(const GameTimer& gt)
 {
-	ImGui::Begin(u8"맵 에디터");
+	// Imgui 오른쪽 위 고정시키기
+	// 현재 화면의 크기 가져와서 오른 쪽 위 여백 좌표 계산
+	ImVec2 windowPos = ImVec2(ImGui::GetIO().DisplaySize.x - 10.0f, 10.0f);
 
-	if (ImGui::SliderFloat(u8"지형 높이", &mHeightScale, 0.0f, 5.0f))
+	// 창의 위치 피벗을 오른쪽 위 모서리로 설정
+	ImVec2 windowPosPivot = ImVec2(1.0f, 0.0f);
+
+	// 다음 만들어질 창을 무조건(Always) 해당 위치로 고정
+	ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always, windowPosPivot);
+	// 창을 생성할 때 움직이지 못하게(Nomove) 하고, 내용물에 맞춰 크기 자동조절(alwaysAutoResize)
+	ImGui::Begin(u8"맵 에디터", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize);
+
+	if (ImGui::BeginTabBar(u8"맵 에디터 탭"))
 	{
-		// 슬라이더가 움직이면 3개의 프레임 리소스를 모두 업데이트하도록 카운트 설정
-		mLandDirtyFrames = gNumFrameResources;
+		// 지형 탭
+		if (ImGui::BeginTabItem(u8" 지형 "))
+		{
+			ImGui::Text(u8" 지형 높이 & 고도 조절");
+			ImGui::PushItemWidth(180.0f);
+
+			// 슬라이더 세팅
+			if (ImGui::SliderFloat(u8" 지형 높이", &mHeightScale, 0.0f, 5.0f))
+				mLandDirtyFrames = gNumFrameResources; //슬라이더가 움직이면 프레임 리소스를 모두 업데이트하도록 설정
+
+			if (ImGui::SliderFloat(u8"모래 지형 라인", &mLowThreshold, -5.0f, mHighThreshold))
+				mLandDirtyFrames = gNumFrameResources;
+
+			if (ImGui::SliderFloat(u8"눈 지형 라인", &mHighThreshold, mLowThreshold, 30.0f))
+				mLandDirtyFrames = gNumFrameResources;
+
+			ImGui::PopItemWidth();
+
+			ImGui::Dummy(ImVec2(0.0f, 5.0f)); // 5픽셀만큼 띄우기
+			ImGui::Separator();// 구분 선
+			ImGui::Dummy(ImVec2(0.0f, 10.0f));
+
+			ImGui::Text(u8" 지형 색상");
+			if (ImGui::ColorEdit4(u8" 아래", &mLowColor.x)) mLandDirtyFrames = gNumFrameResources;
+			if (ImGui::ColorEdit4(u8" 중간", &mMidColor.x)) mLandDirtyFrames = gNumFrameResources;
+			if (ImGui::ColorEdit4(u8" 위", &mHighColor.x)) mLandDirtyFrames = gNumFrameResources;
+			ImGui::Dummy(ImVec2(0.0f, 10.0f));
+
+			ImGui::EndTabItem();
+		}
+
+		// 조명 탭
+		if (ImGui::BeginTabItem(u8" 조명 "))
+		{
+			ImGui::Text(u8"조명 조절");
+			
+
+			ImGui::EndTabItem();
+		}
+
+		ImGui::EndTabBar(); // 탭바 끝
 	}
 
 	ImGui::End();
@@ -620,7 +662,6 @@ void TexWavesApp::UpdateLandVB(const GameTimer& gt)
 	if (mLandDirtyFrames <= 0) return;
 
 	auto currLandVB = mCurrFrameResource->LandVB.get();
-
 	for (size_t i = 0; i < mLandVertices.size(); ++i)
 	{
 		Vertex v = mLandVertices[i]; // 원본 정점 데이터 복사
@@ -637,6 +678,22 @@ void TexWavesApp::UpdateLandVB(const GameTimer& gt)
 		);
 		XMVECTOR unitNormal = XMVector3Normalize(XMLoadFloat3(&n));
 		XMStoreFloat3(&v.Normal, unitNormal);
+
+		if (p.y < mLowThreshold)
+		{
+			// 아래
+			v.Color = mLowColor;
+		}
+		else if (p.y < mHighThreshold)
+		{
+			// 중간
+			v.Color = mMidColor;
+		}
+		else
+		{
+			// 위
+			v.Color = mHighColor;
+		}
 
 		// 현재 프레임 리소스의 UploadBuffer에 변경된 정점 덮어쓰기
 		currLandVB->CopyData(i, v);
@@ -767,6 +824,7 @@ void TexWavesApp::BuildShadersAndInputLayout()
 		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 	};
 }
 

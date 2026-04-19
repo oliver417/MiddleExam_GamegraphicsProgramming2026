@@ -64,6 +64,20 @@ enum class RenderLayer : int
 	Count
 };
 
+// 헬프 마커 유틸리티 함수 (ImGui 데모 코드에서 발췌)
+static void HelpMarker(const char* desc)
+{
+	ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::BeginTooltip();
+		ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+		ImGui::TextUnformatted(desc);
+		ImGui::PopTextWrapPos();
+		ImGui::EndTooltip();
+	}
+}
+
 class TexWavesApp : public D3DApp
 {
 public:
@@ -95,6 +109,7 @@ private:
 	void UpdateUI(const GameTimer& gt);
 	void UpdateLandVB(const GameTimer& gt);
 
+	void LoadHeightmap(std::string filename);
 	void LoadTextures();
 	void BuildRootSignature();
 	void BuildDescriptorHeaps();
@@ -161,6 +176,12 @@ private:
 
 	float mLowThreshold = 2.0f; // 아래 -> 중간 기준점
 	float mHighThreshold = 10.0f; // 중간 -> 위 기준점
+
+	std::vector<float> mHeightMap;
+	int mHeightMapWidth = 256; // 하이트맵 가로 크기
+	int mHeightMapHeight = 256; // 하이트맵 세로 크기
+	bool mIsHeightMapLoaded = false;
+	bool mUseHeightmap = false; // 하이트맵 적용 여부 체크박스용
 
 	POINT mLastMousePos;
 };
@@ -616,9 +637,17 @@ void TexWavesApp::UpdateUI(const GameTimer& gt)
 			ImGui::Text(u8" 지형 높이 & 고도 조절");
 			ImGui::PushItemWidth(180.0f);
 
+			// 하이트맵이 로드되어 있고, 체크박스가 켜져있는지 확인
+			bool isHeightmapActive = (mUseHeightmap && mIsHeightMapLoaded);
+
+			// 하이트맵이 켜져있으면 아래의 UI를 비활성화 함
+			ImGui::BeginDisabled(isHeightmapActive);
+
 			// 슬라이더 세팅
 			if (ImGui::SliderFloat(u8" 지형 높이", &mHeightScale, 0.0f, 5.0f))
 				mLandDirtyFrames = gNumFrameResources; //슬라이더가 움직이면 프레임 리소스를 모두 업데이트하도록 설정
+
+			ImGui::EndDisabled(); // 비활성화 영역 종료
 
 			if (ImGui::SliderFloat(u8"모래 지형 라인", &mLowThreshold, -5.0f, mHighThreshold))
 				mLandDirtyFrames = gNumFrameResources;
@@ -642,9 +671,47 @@ void TexWavesApp::UpdateUI(const GameTimer& gt)
 		}
 
 		// 조명 탭
-		if (ImGui::BeginTabItem(u8" 조명 "))
+		if (ImGui::BeginTabItem(u8" 하이트맵 "))
 		{
-			ImGui::Text(u8"조명 조절");
+			// 하이트맵 적용 스위치
+			if (ImGui::Checkbox(u8"하이트맵 데이터 사용", &mUseHeightmap))
+			{
+				mLandDirtyFrames = gNumFrameResources; // 체크 상태가 변하면 지형 업데이트
+			}
+
+			ImGui::SameLine();
+			HelpMarker(u8"하이트맵 파일이 로드되어 있어야 작동합니다.");
+			ImGui::Separator();
+
+			// 파일 로드 버튼
+			if (ImGui::Button(u8"RAW File 로드"))
+			{
+				wchar_t filename[MAX_PATH] = { 0 };
+				OPENFILENAMEW ofn;
+				ZeroMemory(&ofn, sizeof(ofn));
+				ofn.lStructSize = sizeof(ofn);
+				ofn.hwndOwner = mhMainWnd;
+				ofn.lpstrFilter = L"RAW Files (*.raw)\0*.raw\0All Files (*.*)\0*.*\0";
+				ofn.lpstrFile = filename;
+				ofn.nMaxFile = MAX_PATH;
+				ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+				ofn.lpstrDefExt = L"raw";
+
+				if (GetOpenFileNameW(&ofn)) // 윈도우 창 뜸
+				{
+					// 와이드 문자열을 string으로 변환하여 로드 함수 호출
+					std::wstring ws(filename);
+					std::string strPath(ws.begin(), ws.end());
+					LoadHeightmap(strPath);
+				}
+			}
+
+			if (mIsHeightMapLoaded) {
+				ImGui::TextColored(ImVec4(0, 1, 0, 1), u8"상태: 하이트맵 로드");
+			}
+			else {
+				ImGui::TextColored(ImVec4(1, 0, 0, 1), u8"상태: 데이터 없음");
+			}
 			
 
 			ImGui::EndTabItem();
@@ -667,18 +734,50 @@ void TexWavesApp::UpdateLandVB(const GameTimer& gt)
 		Vertex v = mLandVertices[i]; // 원본 정점 데이터 복사
 		XMFLOAT3 p = v.Pos;
 
-		// 새로운 mHeightScale을 적용하여 높이(y)와 법선(Normal)을 재계산
-		p.y = mHeightScale * 0.3f * (p.z * sinf(0.1f * p.x) + p.x * cosf(0.1f * p.z));
-		v.Pos = p;
+		if (mUseHeightmap && mIsHeightMapLoaded) {
+			p.y = mHeightMap[i] * 10.0f;
+			v.Pos = p;
 
-		XMFLOAT3 n(
-			-mHeightScale * 0.03f * p.z * cosf(0.1f * p.x) - mHeightScale * 0.3f * cosf(0.1f * p.z),
-			1.0f,
-			-mHeightScale * 0.3f * sinf(0.1f * p.x) + mHeightScale * 0.03f * p.x * sinf(0.1f * p.z)
-		);
-		XMVECTOR unitNormal = XMVector3Normalize(XMLoadFloat3(&n));
-		XMStoreFloat3(&v.Normal, unitNormal);
+			// 그림자(법선) 계산: 인덱스(i)를 직접 활용
+			int W = mHeightMapWidth; // 가로 길이 (보통 256 또는 257)
+			// 내 1차원 인덱스(i)를 2차원 (x, y) 좌표로 변환
+			int x = i % W;
+			int y = i / W;
+			
+			// 상하좌우 인덱스 구하기 (지형 끝부분에서는 밖으로 안 나가게 내 위치 유지)
+			int left = (x > 0) ? (i - 1) : i;
+			int right = (x < W - 1) ? (i + 1) : i;
+			int top = (y > 0) ? (i - W) : i;
+			int bottom = (y < mHeightMapHeight - 1) ? (i + W) : i;
 
+			// 상하좌우의 실제 높이 가져오기
+			float hL = mHeightMap[left] * mHeightScale * 10.0f;
+			float hR = mHeightMap[right] * mHeightScale * 10.0f;
+			float hT = mHeightMap[top] * mHeightScale * 10.0f;
+			float hB = mHeightMap[bottom] * mHeightScale * 10.0f;
+
+			// 가운데 2.0f 숫자를 1.0f로 낮추면 그림자가 더 날카로워지고, 5.0f로 높이면 둥글둥글해짐
+			XMFLOAT3 n(hL - hR, 2.0f, hB - hT);
+
+			XMVECTOR unitNormal = XMVector3Normalize(XMLoadFloat3(&n));
+			XMStoreFloat3(&v.Normal, unitNormal);
+		}
+		else {
+			// 하이트맵이 없을 때는 기존 수학 공식 사용
+			p.y = mHeightScale * 0.3f * (p.z * sinf(0.1f * p.x) + p.x * cosf(0.1f * p.z));
+			v.Pos = p;
+
+			XMFLOAT3 n(
+				-mHeightScale * 0.03f * p.z * cosf(0.1f * p.x) - mHeightScale * 0.3f * cosf(0.1f * p.z),
+				1.0f,
+				-mHeightScale * 0.3f * sinf(0.1f * p.x) + mHeightScale * 0.03f * p.x * sinf(0.1f * p.z)
+			);
+
+			XMVECTOR unitNormal = XMVector3Normalize(XMLoadFloat3(&n));
+			XMStoreFloat3(&v.Normal, unitNormal);
+		}		
+
+		// 고도별 색상적용
 		if (p.y < mLowThreshold)
 		{
 			// 아래
@@ -701,6 +800,32 @@ void TexWavesApp::UpdateLandVB(const GameTimer& gt)
 
 	// 카운터 감소 (3 -> 2 -> 1 -> 0)
 	mLandDirtyFrames--;
+}
+
+void TexWavesApp::LoadHeightmap(std::string filename)
+{
+	// 파일 읽기 (8비트 기준)
+	std::vector<unsigned char> in(mHeightMapWidth * mHeightMapHeight);
+	std::ifstream fin;
+	fin.open(filename, std::ios_base::binary);
+
+	if (fin)
+	{
+		fin.read((char*)&in[0], (std::streamsize)in.size());
+		fin.close();
+	}
+	else return;
+
+	// 0~255 사이의 값을 float 높이값으로 변환하여 저장
+	mHeightMap.resize(mHeightMapWidth * mHeightMapHeight);
+	for (int i = 0; i < mHeightMapWidth * mHeightMapHeight; ++i)
+	{
+		// 0~255를 0.0~1.0으로 정규화한 뒤, 전체 높이 배율을 곱함
+		mHeightMap[i] = (in[i] / 255.0f);
+	}
+
+	mIsHeightMapLoaded = true;
+	mLandDirtyFrames = gNumFrameResources; // 지형 갱신 신호
 }
 
 void TexWavesApp::LoadTextures()

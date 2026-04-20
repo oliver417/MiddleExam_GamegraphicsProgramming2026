@@ -112,6 +112,9 @@ float4 PS(VertexOut pin) : SV_Target
 {
     float4 texColor = gDiffuseMap.Sample(gsamAnisotropicWrap, pin.TexC) * gDiffuseAlbedo;
     
+    // 알파값이 0.1보다 작으면 픽셀을 그리지 않음
+    clip(texColor.a - 0.1f);
+    
     float4 diffuseAlbedo = texColor * pin.Color;
 	
     if (pin.Color.r > 0.9f && pin.Color.g > 0.9f && pin.Color.b > 0.9f)

@@ -64,7 +64,7 @@ enum class RenderLayer : int
 	Count
 };
 
-// 헬프 마커 유틸리티 함수 (ImGui 데모 코드에서 발췌)
+// 헬프 마커 유틸리티 함수 (ImGui 데모 코드에서 가져옴)
 static void HelpMarker(const char* desc)
 {
 	ImGui::TextDisabled("(?)");
@@ -182,6 +182,18 @@ private:
 	int mHeightMapHeight = 256; // 하이트맵 세로 크기
 	bool mIsHeightMapLoaded = false;
 	bool mUseHeightmap = false; // 하이트맵 적용 여부 체크박스용
+
+	float mSunTheta = 1.25f * DirectX::XM_PI; // 태양의 좌우 각도 (동/서)
+	float mSunPhi = DirectX::XM_PIDIV4;       // 태양의 높낮이 각도 (남중고도, 0이면 정수리 위)
+
+	// fence
+	RenderItem* mFenceRitem = nullptr;
+	DirectX::XMFLOAT3 mFenceBasePos = { 0.0f, 2.5f, 0.0f }; // 울타리가 처음 설치된 위치
+	float mFenceMove[3] = { 0.0f, 2.5f, 0.0f }; // XYZ 위치
+	float mFenceScale[3] = { 20.0f, 5.0f, 0.1f }; // 가로, 높이, 두께
+
+	enum TimeOfDay { DAY = 0, SUNSET, NIGHT};
+	int mTimeOfDay = DAY; // 기본값은 낮으로
 
 	POINT mLastMousePos;
 };
@@ -362,8 +374,26 @@ void TexWavesApp::Draw(const GameTimer& gt)
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
 		D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
+	// 시간대에 따라 배경 색상 결정
+	float clearColor[4];
+	if (mTimeOfDay == DAY)
+	{
+		// 낮은 밝은 파란색
+		clearColor[0] = 0.528f; clearColor[1] = 0.808f; clearColor[2] = 0.922f; clearColor[3] = 1.0f;
+	}
+	else if (mTimeOfDay == SUNSET)
+	{
+		// 노을은 붉고 주황빛
+		clearColor[0] = 0.8f;   clearColor[1] = 0.4f;   clearColor[2] = 0.2f;   clearColor[3] = 1.0f;
+	}
+	else // NIGHT
+	{
+		// 밤은 어두운 남색
+		clearColor[0] = 0.05f;  clearColor[1] = 0.05f;  clearColor[2] = 0.1f;   clearColor[3] = 1.0f;
+	}		
+
 	// Clear the back buffer and depth buffer.
-	mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::LightSteelBlue, 0, nullptr);
+	mCommandList->ClearRenderTargetView(CurrentBackBufferView(), clearColor, 0, nullptr);
 	mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
 
 	// Specify the buffers we are going to render to.
@@ -377,7 +407,11 @@ void TexWavesApp::Draw(const GameTimer& gt)
 	auto passCB = mCurrFrameResource->PassCB->Resource();
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
 
+	mCommandList->SetPipelineState(mPSOs["opaque"].Get());
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Opaque]);
+
+	mCommandList->SetPipelineState(mPSOs["alphaTest"].Get());
+	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::AlphaTest]);
 
 	mCommandList->SetPipelineState(mPSOs["transparent"].Get());
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
@@ -548,29 +582,63 @@ void TexWavesApp::UpdateMainPassCB(const GameTimer& gt)
 	XMMATRIX invProj = XMMatrixInverse(&XMMatrixDeterminant(proj), proj);
 	XMMATRIX invViewProj = XMMatrixInverse(&XMMatrixDeterminant(viewProj), viewProj);
 
-	XMStoreFloat4x4(&mMainPassCB.View, XMMatrixTranspose(view));
-	XMStoreFloat4x4(&mMainPassCB.InvView, XMMatrixTranspose(invView));
-	XMStoreFloat4x4(&mMainPassCB.Proj, XMMatrixTranspose(proj));
-	XMStoreFloat4x4(&mMainPassCB.InvProj, XMMatrixTranspose(invProj));
-	XMStoreFloat4x4(&mMainPassCB.ViewProj, XMMatrixTranspose(viewProj));
-	XMStoreFloat4x4(&mMainPassCB.InvViewProj, XMMatrixTranspose(invViewProj));
-	mMainPassCB.EyePosW = mCamera.GetPosition3f();
-	mMainPassCB.RenderTargetSize = XMFLOAT2((float)mClientWidth, (float)mClientHeight);
-	mMainPassCB.InvRenderTargetSize = XMFLOAT2(1.0f / mClientWidth, 1.0f / mClientHeight);
-	mMainPassCB.NearZ = 1.0f;
-	mMainPassCB.FarZ = 1000.0f;
-	mMainPassCB.TotalTime = gt.TotalTime();
-	mMainPassCB.DeltaTime = gt.DeltaTime();
-	mMainPassCB.AmbientLight = { 0.25f, 0.25f, 0.35f, 1.0f };
-	mMainPassCB.Lights[0].Direction = { 0.57735f, -0.57735f, 0.57735f };
-	mMainPassCB.Lights[0].Strength = { 0.9f, 0.9f, 0.9f };
-	mMainPassCB.Lights[1].Direction = { -0.57735f, -0.57735f, 0.57735f };
-	mMainPassCB.Lights[1].Strength = { 0.5f, 0.5f, 0.5f };
-	mMainPassCB.Lights[2].Direction = { 0.0f, -0.707f, -0.707f };
-	mMainPassCB.Lights[2].Strength = { 0.2f, 0.2f, 0.2f };
+	// 버퍼에 담을 구조체 선언
+	PassConstants passConstants;
+
+	// 매트릭스 대입 코드
+	XMStoreFloat4x4(&passConstants.View, XMMatrixTranspose(view));
+	XMStoreFloat4x4(&passConstants.InvView, XMMatrixTranspose(invView));
+	XMStoreFloat4x4(&passConstants.Proj, XMMatrixTranspose(proj));
+	XMStoreFloat4x4(&passConstants.InvProj, XMMatrixTranspose(invProj));
+	XMStoreFloat4x4(&passConstants.ViewProj, XMMatrixTranspose(viewProj));
+	XMStoreFloat4x4(&passConstants.InvViewProj, XMMatrixTranspose(invViewProj));
+	passConstants.EyePosW = mCamera.GetPosition3f();
+	passConstants.RenderTargetSize = XMFLOAT2((float)mClientWidth, (float)mClientHeight);
+	passConstants.InvRenderTargetSize = XMFLOAT2(1.0f / mClientWidth, 1.0f / mClientHeight);
+	passConstants.NearZ = 1.0f;
+	passConstants.FarZ = 1000.0f;
+	passConstants.TotalTime = gt.TotalTime();
+	passConstants.DeltaTime = gt.DeltaTime();
+
+	// 시간에 따른 조명 세팅
+	DirectX::XMFLOAT4 ambientColor;
+	DirectX::XMFLOAT3 sunColor;
+
+	if (mTimeOfDay == DAY)
+	{
+		mSunPhi = DirectX::XM_PIDIV4; // 낮
+		ambientColor = { 0.25f, 0.25f, 0.35f, 1.0f };
+		sunColor = { 1.0f, 0.96f, 0.85f };
+	}
+	else if (mTimeOfDay == SUNSET)
+	{
+		mSunPhi = DirectX::XM_PI / 2.0f - 0.1f; // 노을
+		ambientColor = { 0.15f, 0.1f, 0.1f, 1.0f };
+		sunColor = { 1.0f, 0.4f, 0.1f };
+	}
+	else // NIGHT
+	{
+		mSunPhi = DirectX::XM_PI - 0.2f; // 밤
+		ambientColor = { 0.05f, 0.05f, 0.1f, 1.0f };
+		sunColor = { 0.1f, 0.2f, 0.4f };
+	}
+
+	// 배경광 적용
+	passConstants.AmbientLight = ambientColor;
+
+	// 태양의 방향을 각도를 이용해 3D 벡터로 변환
+	DirectX::XMVECTOR lightDir = -MathHelper::SphericalToCartesian(1.0f, mSunTheta, mSunPhi);
+	DirectX::XMStoreFloat3(&passConstants.Lights[0].Direction, lightDir);
+	passConstants.Lights[0].Strength = sunColor; // 태양/달빛 색상 적용
+
+	// 보조광 설정 (그림자가 진해지는 것을 방지)
+	passConstants.Lights[1].Direction = { -0.57735f, -0.57735f, 0.57735f };
+	passConstants.Lights[1].Strength = { 0.1f, 0.1f, 0.1f };
+	passConstants.Lights[2].Direction = { 0.0f, -0.707f, -0.707f };
+	passConstants.Lights[2].Strength = { 0.0f, 0.0f, 0.0f };
 
 	auto currPassCB = mCurrFrameResource->PassCB.get();
-	currPassCB->CopyData(0, mMainPassCB);
+	currPassCB->CopyData(0, passConstants);
 }
 
 void TexWavesApp::UpdateWaves(const GameTimer& gt)
@@ -670,7 +738,7 @@ void TexWavesApp::UpdateUI(const GameTimer& gt)
 			ImGui::EndTabItem();
 		}
 
-		// 조명 탭
+		// 하이트맵 탭
 		if (ImGui::BeginTabItem(u8" 하이트맵 "))
 		{
 			// 하이트맵 적용 스위치
@@ -713,6 +781,49 @@ void TexWavesApp::UpdateUI(const GameTimer& gt)
 				ImGui::TextColored(ImVec4(1, 0, 0, 1), u8"상태: 데이터 없음");
 			}
 			
+
+			ImGui::EndTabItem();
+		}
+
+		// 조명 탭
+		if (ImGui::BeginTabItem(u8" 조명 & 시간 "))
+		{
+			ImGui::Text(u8" 시간대 선택 (낮과 밤)");
+
+			// 라이도 버튼으로 시간대 선택
+			ImGui::RadioButton(u8"낮 (Day)", &mTimeOfDay, DAY); ImGui::SameLine();
+			ImGui::RadioButton(u8"노을 (Sunset)", &mTimeOfDay, SUNSET); ImGui::SameLine();
+			ImGui::RadioButton(u8"밤 (Night)", &mTimeOfDay, NIGHT);
+
+			ImGui::Separator();
+
+			ImGui::EndTabItem();
+		}
+
+		// 울타리 탭
+		if (ImGui::BeginTabItem(u8" 울타리 "))
+		{
+			ImGui::Text(u8" Fence 세팅 ");
+
+			bool isChanged = false; // 값이 변경되었을 때만 계산하도록
+			isChanged |= ImGui::SliderFloat3(u8"위치", mFenceMove, -50.0f, 50.0f);
+			isChanged |= ImGui::SliderFloat3(u8"크기", mFenceScale, 0.1f, 50.0f);
+
+			ImGui::Separator();
+
+			if (isChanged && mFenceRitem != nullptr)
+			{
+				XMMATRIX scale = XMMatrixScaling(mFenceScale[0], mFenceScale[1], mFenceScale[2]);
+				XMMATRIX offset = XMMatrixTranslation(
+					mFenceBasePos.x + mFenceMove[0],
+					mFenceBasePos.y + mFenceMove[1],
+					mFenceBasePos.z + mFenceMove[2]
+				);
+
+				XMStoreFloat4x4(&mFenceRitem->World, scale * offset);
+
+				mFenceRitem->NumFramesDirty = gNumFrameResources;
+			}
 
 			ImGui::EndTabItem();
 		}
@@ -846,7 +957,7 @@ void TexWavesApp::LoadTextures()
 
 	auto fenceTex = std::make_unique<Texture>();
 	fenceTex->Name = "fenceTex";
-	fenceTex->Filename = L"../../Textures/WoodCrate01.dds";
+	fenceTex->Filename = L"../../Textures/WireFence.dds";
 	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
 		mCommandList.Get(), fenceTex->Filename.c_str(),
 		fenceTex->Resource, fenceTex->UploadHeap));
@@ -939,10 +1050,18 @@ void TexWavesApp::BuildDescriptorHeaps()
 	md3dDevice->CreateShaderResourceView(fenceTex.Get(), &srvDesc, hDescriptor);
 }
 
+const D3D_SHADER_MACRO alphaTestDefines[] =
+{
+	"FOG", "1",
+	"ALPHA_TEST", "1",
+	NULL, NULL
+};
+
 void TexWavesApp::BuildShadersAndInputLayout()
 {
 	mShaders["standardVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_0");
 	mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "PS", "ps_5_0");
+	mShaders["alphaTestPS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", alphaTestDefines, "PS", "ps_5_0");
 
 	mInputLayout =
 	{
@@ -1079,6 +1198,7 @@ void TexWavesApp::BuildBoxGeometry()
 		vertices[i].Pos = p;
 		vertices[i].Normal = box.Vertices[i].Normal;
 		vertices[i].TexC = box.Vertices[i].TexC;
+		vertices[i].Color = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
 	}
 
 	const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
@@ -1150,6 +1270,7 @@ void TexWavesApp::BuildPSOs()
 
 
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = opaquePsoDesc;
+
 	// 블렌딩 설정 투명도
 	D3D12_RENDER_TARGET_BLEND_DESC transparencyBlendDesc;
 	transparencyBlendDesc.BlendEnable = true;
@@ -1165,6 +1286,19 @@ void TexWavesApp::BuildPSOs()
 
 	transparentPsoDesc.BlendState.RenderTarget[0] = transparencyBlendDesc;
 	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mPSOs["transparent"])));
+
+	// 울타리용
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC alphaTestPsoDesc = opaquePsoDesc;
+
+	alphaTestPsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["alphaTestPS"]->GetBufferPointer()),
+		mShaders["alphaTestPS"]->GetBufferSize()
+	};
+	// 백페이스 컬링 끄기
+	alphaTestPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&alphaTestPsoDesc, IID_PPV_ARGS(&mPSOs["alphaTest"])));
 }
 
 void TexWavesApp::BuildFrameResources()
@@ -1212,7 +1346,6 @@ void TexWavesApp::BuildMaterials()
 void TexWavesApp::BuildRenderItems()
 {
 	auto wavesRitem = std::make_unique<RenderItem>();
-//	wavesRitem->World = MathHelper::Identity4x4();
 	XMMATRIX scale = XMMatrixScaling(5.0f, 1.0f, 5.0f);
 	XMMATRIX offset = XMMatrixTranslation(0.0f, 0.5f, 0.0f);
 	XMStoreFloat4x4(&wavesRitem->World, XMMatrixMultiply(scale, offset));
@@ -1244,7 +1377,7 @@ void TexWavesApp::BuildRenderItems()
 	mRitemLayer[(int)RenderLayer::Opaque].push_back(gridRitem.get());
 
 	auto boxRitem = std::make_unique<RenderItem>();
-	XMStoreFloat4x4(&boxRitem->World, XMMatrixTranslation(0.0f, 5.0f, 0.0f));
+	XMStoreFloat4x4(&boxRitem->World, XMMatrixScaling(20.0f, 20.0f, 0.1f) * XMMatrixTranslation(0.0f, 2.5f, 0.0f));
 	boxRitem->ObjCBIndex = 2;
 	boxRitem->Mat = mMaterials["wirefence"].get();
 	boxRitem->Geo = mGeometries["boxGeo"].get();
@@ -1252,8 +1385,9 @@ void TexWavesApp::BuildRenderItems()
 	boxRitem->IndexCount = boxRitem->Geo->DrawArgs["box"].IndexCount;
 	boxRitem->StartIndexLocation = boxRitem->Geo->DrawArgs["box"].StartIndexLocation;
 	boxRitem->BaseVertexLocation = boxRitem->Geo->DrawArgs["box"].BaseVertexLocation;
+	mFenceRitem = boxRitem.get();
 
-	//mRitemLayer[(int)RenderLayer::Opaque].push_back(boxRitem.get()); 일단 화면에 안그림
+	mRitemLayer[(int)RenderLayer::AlphaTest].push_back(boxRitem.get()); //일단 화면에 안그림
 
 	mAllRitems.push_back(std::move(wavesRitem));
 	mAllRitems.push_back(std::move(gridRitem));

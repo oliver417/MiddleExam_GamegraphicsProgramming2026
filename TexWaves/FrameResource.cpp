@@ -13,6 +13,7 @@ FrameResource::FrameResource(ID3D12Device* device, UINT passCount, UINT objectCo
 
     WavesVB = std::make_unique<UploadBuffer<Vertex>>(device, waveVertCount, false);
     LandVB = std::make_unique<UploadBuffer<Vertex>>(device, landVertCount, false);
+    TreeVB = std::make_unique<UploadBuffer<TreeSpriteVertex>>(device, MAX_TREES, false);
 }
 
 FrameResource::~FrameResource()

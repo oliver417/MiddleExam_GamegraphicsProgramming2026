@@ -2,6 +2,8 @@
 // TexWavesApp.cpp by Frank Luna (C) 2015 All Rights Reserved.
 //***************************************************************************************
 
+#include <fstream>
+#include <string>
 #include "../../Common/d3dApp.h"
 #include "../../Common/MathHelper.h"
 #include "../../Common/UploadBuffer.h"
@@ -56,13 +58,6 @@ struct RenderItem
 	int BaseVertexLocation = 0;
 };
 
-struct TreeSpriteVertex
-{
-	DirectX::XMFLOAT3 Pos;
-	DirectX::XMFLOAT2 Size; // 나무의 가로/세로 크기를 담을 전용 변수
-};
-
-
 enum class RenderLayer : int
 {
 	Opaque = 0,
@@ -116,6 +111,7 @@ private:
 	void UpdateWaves(const GameTimer& gt);
 	void UpdateUI(const GameTimer& gt);
 	void UpdateLandVB(const GameTimer& gt);
+	void UpdateTreeVB(const GameTimer& gt);
 
 	void LoadHeightmap(std::string filename);
 	void LoadTextures();
@@ -125,11 +121,15 @@ private:
 	void BuildLandGeometry();
 	void BuildWavesGeometry();
 	void BuildBoxGeometry();
-	void BuildPSOs();
-	void BuildFrameResources();
-	void BuildMaterials();
 	void BuildTreeSpritesGeometry();
+
+	void SaveMap();
+	void LoadMap();
+
+	void BuildMaterials();
 	void BuildRenderItems();
+	void BuildFrameResources();
+	void BuildPSOs();
 	void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
 
 	std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
@@ -201,9 +201,17 @@ private:
 	DirectX::XMFLOAT3 mFenceBasePos = { 0.0f, 2.5f, 0.0f }; // 울타리가 처음 설치된 위치
 	float mFenceMove[3] = { 0.0f, 2.5f, 0.0f }; // XYZ 위치
 	float mFenceScale[3] = { 20.0f, 5.0f, 0.1f }; // 가로, 높이, 두께
+	bool mShowFence = true; // 표시 여부
 
 	enum TimeOfDay { DAY = 0, SUNSET, NIGHT};
 	int mTimeOfDay = DAY; // 기본값은 낮으로
+
+	// 나무
+	int mTreeCount = 16; // Imgui에서 조절할 기본 나무 갯수
+	RenderItem* mTreeRitem = nullptr; // 나무 렌더 아이템
+	std::vector<XMFLOAT2> mTreeLocalPositions; // 나무의 로컬 좌표 저장
+	std::vector<XMFLOAT2> mTreeSizes;          // 각 나무의 고정 크기
+	int mTreeDirtyFrames = gNumFrameResources; // 다시 그려줄 더티프레임
 
 	POINT mLastMousePos;
 };
@@ -264,6 +272,7 @@ bool TexWavesApp::Initialize()
 	BuildLandGeometry();
 	BuildWavesGeometry();
 	BuildBoxGeometry();
+	BuildTreeSpritesGeometry();
 	BuildMaterials();
 	BuildRenderItems();
 	BuildFrameResources();
@@ -363,6 +372,7 @@ void TexWavesApp::Update(const GameTimer& gt)
 	UpdateMainPassCB(gt);
 	UpdateWaves(gt);
 	UpdateLandVB(gt);
+	UpdateTreeVB(gt);
 }
 
 void TexWavesApp::Draw(const GameTimer& gt)
@@ -726,7 +736,10 @@ void TexWavesApp::UpdateUI(const GameTimer& gt)
 
 			// 슬라이더 세팅
 			if (ImGui::SliderFloat(u8" 지형 높이", &mHeightScale, 0.0f, 5.0f))
+			{
 				mLandDirtyFrames = gNumFrameResources; //슬라이더가 움직이면 프레임 리소스를 모두 업데이트하도록 설정
+				mTreeDirtyFrames = gNumFrameResources;
+			}
 
 			ImGui::EndDisabled(); // 비활성화 영역 종료
 
@@ -818,6 +831,23 @@ void TexWavesApp::UpdateUI(const GameTimer& gt)
 		{
 			ImGui::Text(u8" Fence 세팅 ");
 
+			if (ImGui::Checkbox(u8"Fence 표시", &mShowFence))
+			{
+				if (mFenceRitem != nullptr)
+				{
+					if (mShowFence)
+					{
+						// 체크됨
+						mFenceRitem->IndexCount = mFenceRitem->Geo->DrawArgs["box"].IndexCount;
+					}
+					else
+					{
+						// 체크 해제됨
+						mFenceRitem->IndexCount = 0;
+					}
+				}
+			}
+
 			bool isChanged = false; // 값이 변경되었을 때만 계산하도록
 			isChanged |= ImGui::SliderFloat3(u8"위치", mFenceMove, -50.0f, 50.0f);
 			isChanged |= ImGui::SliderFloat3(u8"크기", mFenceScale, 0.1f, 50.0f);
@@ -836,6 +866,42 @@ void TexWavesApp::UpdateUI(const GameTimer& gt)
 				XMStoreFloat4x4(&mFenceRitem->World, scale * offset);
 
 				mFenceRitem->NumFramesDirty = gNumFrameResources;
+			}
+
+			ImGui::EndTabItem();
+		}
+
+		// 나무 탭
+		if (ImGui::BeginTabItem(u8" 나무 "))
+		{
+			ImGui::Text(u8" 나무 세팅 ");
+
+			if (ImGui::SliderInt(u8"나무 개수", &mTreeCount, 0, MAX_TREES))
+			{
+				if (mTreeRitem != nullptr)
+				{
+					mTreeRitem->IndexCount = mTreeCount;
+				}
+			}		
+
+			ImGui::EndTabItem();
+		}
+
+		// 저장 탭
+		if (ImGui::BeginTabItem(u8" 저장 "))
+		{
+			ImGui::Separator();
+
+			if (ImGui::Button(u8"Map 저장", ImVec2(100, 30)))
+			{
+				SaveMap();
+			}
+
+			ImGui::SameLine();//버튼 가로로 배치할 때
+
+			if (ImGui::Button(u8"Map 불러오기", ImVec2(100, 30)))
+			{
+				LoadMap();
 			}
 
 			ImGui::EndTabItem();
@@ -924,6 +990,27 @@ void TexWavesApp::UpdateLandVB(const GameTimer& gt)
 
 	// 카운터 감소 (3 -> 2 -> 1 -> 0)
 	mLandDirtyFrames--;
+}
+
+void TexWavesApp::UpdateTreeVB(const GameTimer& gt)
+{
+	if (mTreeDirtyFrames <= 0) return;
+
+	auto currTreeVB = mCurrFrameResource->TreeVB.get();
+	for (int i = 0; i < MAX_TREES; ++i)
+	{
+		float x = mTreeLocalPositions[i].x;
+		float z = mTreeLocalPositions[i].y;
+		float halfHeight = mTreeSizes[i].y * 0.5f;
+		float y = GetHillsHeight(x, z) * mHeightScale + halfHeight;
+
+		TreeSpriteVertex v;
+		v.Pos = XMFLOAT3(x * 5.0f, y, z * 5.0f);
+		v.Size = mTreeSizes[i];
+		currTreeVB->CopyData(i, v);
+	}
+
+	mTreeDirtyFrames--;
 }
 
 void TexWavesApp::LoadHeightmap(std::string filename)
@@ -1427,24 +1514,42 @@ void TexWavesApp::BuildMaterials()
 
 void TexWavesApp::BuildTreeSpritesGeometry()
 {
-	// 나무 16개
-	const int treeCount = 16;
-	std::array<TreeSpriteVertex, 16> vertices;
+	std::vector<TreeSpriteVertex> vertices(MAX_TREES);
+	std::vector<std::uint16_t> indices(MAX_TREES);
 
-	for (UINT i = 0; i < treeCount; ++i)
+	mTreeLocalPositions.resize(MAX_TREES); // 로컬 좌표 저장
+	mTreeSizes.resize(MAX_TREES); // 사이즈도
+
+	for (int i = 0; i < MAX_TREES; ++i)
 	{
-		float x = MathHelper::RandF(-45.0f, 45.0f);
-		float z = MathHelper::RandF(-45.0f, 45.0f);
-		float y = GetHillsHeight(x, z);
+		//랜덤한 좌표 대신, 50x50 격자 중 랜덤한 격자 고르기
+		int col = MathHelper::Rand(0, 50);
+		int row = MathHelper::Rand(0, 50);
 
-		vertices[i].Pos = XMFLOAT3(x, y, z);
-		// Size 변수에 나무의 크기를 넣어줌
-		vertices[i].Size = XMFLOAT2(MathHelper::RandF(4.0f, 6.0f), MathHelper::RandF(4.0f, 6.0f));
-	}
 
-	std::array<std::uint16_t, 16> indices;
-	for (UINT i = 0; i < treeCount; ++i)
-	{
+		// 로컬 좌표 계산 (전체 160을 50칸으로 나누면 한 칸은 3.2)
+		float x_local = -80.0f + (col * 3.2f);
+		float z_local = 80.0f - (row * 3.2f);
+
+		mTreeLocalPositions[i] = { x_local, z_local };
+		mTreeSizes[i] = { MathHelper::RandF(20.0f, 30.0f), MathHelper::RandF(20.0f, 30.0f) };
+
+		// 정점 위치
+		float y_local = GetHillsHeight(x_local, z_local);
+
+		float halfHeight = mTreeSizes[i].y * 0.5f;// 나무 절반 오프셋
+
+		float worldX = x_local * 5.0f;
+		float worldY = y_local * mHeightScale + halfHeight;
+		float worldZ = z_local * 5.0f;
+
+		// 바닥에 파묻히지 않게 살짝 위로 올림
+		worldY += 2.0f;
+
+		vertices[i].Pos = XMFLOAT3(worldX, worldY, worldZ);
+
+		vertices[i].Size = mTreeSizes[i];
+
 		indices[i] = i;
 	}
 
@@ -1478,6 +1583,72 @@ void TexWavesApp::BuildTreeSpritesGeometry()
 	geo->DrawArgs["points"] = submesh;
 
 	mGeometries["treeGeo"] = std::move(geo);
+}
+// 맵 상태를 파일에 저장하는 함수
+void TexWavesApp::SaveMap()
+{
+	std::ofstream fout("map_data.txt");
+
+	if (fout.is_open())
+	{
+		// 나무 개수 저장
+		fout << "TreeCount " << mTreeCount << std::endl;
+
+		// 울타리 표시 여부 저장
+		fout << "ShowFence " << (mShowFence ? 1 : 0) << std::endl;
+
+		// 시간 저장
+		fout << "TimeOfDay " << mTimeOfDay << std::endl;
+
+		fout.close();
+		// 콘솔창 띄움
+		MessageBoxA(mhMainWnd, "성공적으로 맵이 저장되었습니다!", "저장 완료", MB_OK | MB_ICONINFORMATION);
+	}
+	else
+	{
+		MessageBoxA(mhMainWnd, "맵 저장에 실패했습니다. 폴더 권한을 확인해주세요.", "저장 실패", MB_OK | MB_ICONERROR);
+	}
+}
+// 파일에서 데이터를 읽어와 맵에 적용하는 함수
+void TexWavesApp::LoadMap()
+{
+	std::ifstream fin("map_data.txt");
+	std::string category;
+
+	if (fin.is_open())
+	{
+		while (fin >> category)
+		{
+			if (category == "TreeCount")
+			{
+				fin >> mTreeCount;
+				// 불러온 개수를 실제 렌더 아이템에 즉시 반영
+				if (mTreeRitem != nullptr)
+					mTreeRitem->IndexCount = mTreeCount;
+			}
+			else if (category == "ShowFence")
+			{
+				int visibility;
+				fin >> visibility;
+				mShowFence = (visibility == 1);
+
+				// 울타리 표시 여부를 렌더 아이템에 즉시 반영
+				if (mFenceRitem != nullptr)
+				{
+					mFenceRitem->IndexCount = mShowFence ?
+						mFenceRitem->Geo->DrawArgs["box"].IndexCount : 0;
+				}
+			}
+			else if (category == "TimeOfDay")
+			{
+				fin >> mTimeOfDay;
+				
+				
+			}
+		}
+		fin.close();
+		OutputDebugStringA("Map Loaded from map_data.txt\n");
+	}
 }
 
 void TexWavesApp::BuildRenderItems()
@@ -1524,11 +1695,27 @@ void TexWavesApp::BuildRenderItems()
 	boxRitem->BaseVertexLocation = boxRitem->Geo->DrawArgs["box"].BaseVertexLocation;
 	mFenceRitem = boxRitem.get();
 
-	mRitemLayer[(int)RenderLayer::AlphaTest].push_back(boxRitem.get()); //일단 화면에 안그림
+	mRitemLayer[(int)RenderLayer::AlphaTest].push_back(boxRitem.get());
+
+	auto treeRitem = std::make_unique<RenderItem>();
+	treeRitem->World = MathHelper::Identity4x4();
+	treeRitem->ObjCBIndex = 3;
+	treeRitem->Mat = mMaterials["treeMat"].get();
+	treeRitem->Geo = mGeometries["treeGeo"].get();
+
+	treeRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
+
+	treeRitem->IndexCount = treeRitem->Geo->DrawArgs["points"].IndexCount;
+	treeRitem->StartIndexLocation = treeRitem->Geo->DrawArgs["points"].StartIndexLocation;
+	treeRitem->BaseVertexLocation = treeRitem->Geo->DrawArgs["points"].BaseVertexLocation;
+	mTreeRitem = treeRitem.get(); // 나무
+
+	mRitemLayer[(int)RenderLayer::TreeSprites].push_back(treeRitem.get());
 
 	mAllRitems.push_back(std::move(wavesRitem));
 	mAllRitems.push_back(std::move(gridRitem));
 	mAllRitems.push_back(std::move(boxRitem));
+	mAllRitems.push_back(std::move(treeRitem));
 }
 
 void TexWavesApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
@@ -1562,6 +1749,14 @@ void TexWavesApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std:
 			vbv.StrideInBytes = sizeof(Vertex);
 			vbv.SizeInBytes = mWaves->VertexCount() * sizeof(Vertex);
 
+			cmdList->IASetVertexBuffers(0, 1, &vbv);
+		}
+		else if (ri->Geo->Name == "treeGeo")
+		{
+			D3D12_VERTEX_BUFFER_VIEW vbv;
+			vbv.BufferLocation = mCurrFrameResource->TreeVB->Resource()->GetGPUVirtualAddress();
+			vbv.StrideInBytes = sizeof(TreeSpriteVertex);
+			vbv.SizeInBytes = MAX_TREES * sizeof(TreeSpriteVertex);
 			cmdList->IASetVertexBuffers(0, 1, &vbv);
 		}
 		else

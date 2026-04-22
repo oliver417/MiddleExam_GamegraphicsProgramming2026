@@ -1,0 +1,3 @@
+TreeCount 16
+ShowFence 1
+TimeOfDay 0

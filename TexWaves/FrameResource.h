@@ -44,6 +44,14 @@ struct Vertex
     DirectX::XMFLOAT4 Color;
 };
 
+const int MAX_TREES = 1000;
+// 나무의 가로/세로 크기를 담을 전용 구조체
+struct TreeSpriteVertex
+{
+    DirectX::XMFLOAT3 Pos;
+    DirectX::XMFLOAT2 Size;
+};
+
 // Stores the resources needed for the CPU to build the command lists
 // for a frame.  
 struct FrameResource
@@ -71,6 +79,8 @@ public:
     std::unique_ptr<UploadBuffer<Vertex>> WavesVB = nullptr;
 
     std::unique_ptr<UploadBuffer<Vertex>> LandVB = nullptr; // 지형 높낮이 구분하려고
+
+    std::unique_ptr<UploadBuffer<TreeSpriteVertex>> TreeVB = nullptr; // 나무 땜에
 
     // Fence value to mark commands up to this fence point.  This lets us
     // check if these frame resources are still in use by the GPU.
